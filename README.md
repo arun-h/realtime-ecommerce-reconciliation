@@ -57,6 +57,7 @@ If normalisation logic has a bug, stripe-raw-events is untouched.
 
 ## Architecture
 
+![ecommerce-reconciliation– Core Architecture](docs/architecture.png)
 ---
 
 ## Design Decisions
