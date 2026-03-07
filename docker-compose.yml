@@ -1,0 +1,165 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────
+# WHY DOCKER COMPOSE?
+# Every service (Kafka, Postgres, MinIO) needs to talk to each other.
+# Docker Compose puts them all on one virtual network automatically.
+# You run ONE command and the entire platform starts.
+# ─────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── ZOOKEEPER ──────────────────────────────────────────────────
+  # Kafka needs Zookeeper to track which brokers are alive,
+  # which topics exist, and where partitions live.
+  # Think of it as Kafka's address book / coordinator.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: echo srvr | nc localhost 2181 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ecommerce-net
+
+  # ── KAFKA BROKER ───────────────────────────────────────────────
+  # The actual message queue. Producers write here.
+  # Consumers (Spark, DLQ consumer) read from here.
+  #
+  # LISTENERS explained (this confuses everyone):
+  #   INTERNAL → used by other Docker containers (Spark, producers)
+  #   EXTERNAL → used by your host machine (your Python scripts outside Docker)
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"   # External: your WSL2 host connects here
+      - "9093:9093"   # Internal: Docker containers connect here
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9093,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # We create topics explicitly
+      KAFKA_LOG_RETENTION_HOURS: 168             # Keep events 7 days (replay capability)
+      KAFKA_LOG_RETENTION_BYTES: 1073741824      # Max 1GB per topic
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - ecommerce-net
+
+  # ── KAFKA UI ───────────────────────────────────────────────────
+  # Visual dashboard so you can SEE your topics and messages.
+  # Visit http://localhost:8080 in your browser.
+  # Invaluable for debugging — you'll use this constantly.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
+    networks:
+      - ecommerce-net
+
+  # ── POSTGRESQL ─────────────────────────────────────────────────
+  # Our operational sink. Reconciled events land here.
+  # Port 5432 is Postgres default.
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      # This mounts our SQL migration file INTO the container.
+      # Postgres runs any .sql file in this folder on first startup.
+      - ./infra/postgres/migrations:/docker-entrypoint-initdb.d
+      - postgres-data:/var/lib/postgresql/data   # Data persists across restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ecommerce-net
+
+  # ── MINIO (S3-COMPATIBLE LOCAL STORAGE) ────────────────────────
+  # WHY MINIO?
+  # We want S3 for raw event archival (Parquet files).
+  # But real AWS S3 costs money and needs internet.
+  # MinIO is 100% S3-compatible — same API, runs locally.
+  # When you deploy to AWS, you change ONE env variable.
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"   # S3 API port
+      - "9001:9001"   # MinIO web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ecommerce-net
+
+  # ── MINIO BUCKET SETUP ─────────────────────────────────────────
+  # Creates our S3 bucket automatically on first run.
+  # "mc" = MinIO Client CLI tool
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb local/ecommerce-raw-events --ignore-existing;
+      mc mb local/spark-checkpoints --ignore-existing;
+      echo 'Buckets created';
+      "
+    networks:
+      - ecommerce-net
+
+# ── NAMED VOLUMES ──────────────────────────────────────────────────
+# Docker manages these. Data survives container restarts.
+volumes:
+  postgres-data:
+  minio-data:
+
+# ── NETWORK ────────────────────────────────────────────────────────
+# All containers share this network and can reach each other
+# by container name (e.g., "kafka", "postgres", "minio")
+networks:
+  ecommerce-net:
+    driver: bridge
