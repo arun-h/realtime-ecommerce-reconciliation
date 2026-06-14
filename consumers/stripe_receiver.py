@@ -21,6 +21,8 @@ import json
 import logging
 import os
 import time
+import random
+import string
 from datetime import datetime, timezone
 
 import stripe
@@ -122,7 +124,9 @@ def normalise_stripe_payload(event: stripe.Event) -> dict:
     # We expect the order_id to be passed as metadata when creating the intent.
     # If missing (e.g. in test triggers), we use the payment_intent id.
     metadata = getattr(data_obj, "metadata", {}) or {}
-    order_id = metadata.get("order_id") or f"UNKNOWN-{data_obj.id}"
+    order_id = metadata.get("order_id") or (
+    "ORD-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+)
 
     return {
         "payment_id":       data_obj.id,
