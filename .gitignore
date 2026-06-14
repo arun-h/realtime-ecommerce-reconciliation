@@ -1,0 +1,4 @@
+.env
+ecomvenv/
+**/__pycache__/
+log4j2.properties

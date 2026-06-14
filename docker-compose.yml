@@ -45,6 +45,8 @@ services:
     ports:
       - "9092:9092"   # External: your WSL2 host connects here
       - "9093:9093"   # Internal: Docker containers connect here
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -156,6 +158,7 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  kafka-data:
 
 # ── NETWORK ────────────────────────────────────────────────────────
 # All containers share this network and can reach each other
