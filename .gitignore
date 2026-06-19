@@ -2,3 +2,10 @@
 ecomvenv/
 **/__pycache__/
 log4j2.properties
+__pycache__/
+*.pyc
+airflow_project/airflow.db
+airflow_project/logs/
+airflow_project/__pycache__/
+airflow_project/dags/__pycache__/
+airflow_project/airflow.cfg
