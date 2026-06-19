@@ -189,6 +189,28 @@ stripe trigger charge.dispute.created
 
 ---
 
+### Test Data and Reconciliation
+
+The reconciliation join requires a shared `order_id` across all three 
+domains. In production, the order service passes `order_id` to Stripe 
+when creating a PaymentIntent via `metadata`, and to the inventory 
+service when reserving stock. This coordination is what enables 
+cross-domain matching.
+
+In this demonstration environment:
+- Stripe test triggers do not carry real order metadata, 
+  so payment events receive synthetic order IDs
+- Inventory producer generates events independently 
+  without linking to specific orders
+
+One synthetic end-to-end test is included (ORD-TEST-E2E-001) 
+to demonstrate the full reconciliation path including SLA 
+calculation and latency measurement. The pipeline logic is 
+correct — the limitation is test data coordination, 
+not architecture.
+
+---
+
 ## Roadmap
 
 1. **PySpark streaming job** — cross-domain reconciliation, watermarked joins, SLA tracking
