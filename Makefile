@@ -13,13 +13,15 @@
 # ─────────────────────────────────────────────────────────────────
 
 .PHONY: help up down logs topics produce-orders produce-inventory \
-        produce-payments produce-all dlq test clean status
+        produce-payments produce-all dlq test clean status \
+        demo demo-stop demo-watch demo-status init
 
 # Default target — shows available commands
 help:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  E-Commerce Event Platform — Available Commands"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "  make init            First-time setup (up + topics)"
 	@echo "  make up              Start all Docker services"
 	@echo "  make down            Stop all Docker services"
 	@echo "  make topics          Create Kafka topics"
@@ -27,6 +29,10 @@ help:
 	@echo "  make produce-orders  Run order event producer"
 	@echo "  make produce-all     Run all producers simultaneously"
 	@echo "  make dlq             Run DLQ consumer"
+	@echo "  make demo            Start full pipeline (background, one command)"
+	@echo "  make demo-watch      Watch clean filtered Spark logs"
+	@echo "  make demo-status     Check which demo processes are running"
+	@echo "  make demo-stop       Stop all demo processes gracefully"
 	@echo "  make logs            Tail logs from all services"
 	@echo "  make test            Run test suite"
 	@echo "  make clean           Remove all containers and volumes"
@@ -46,6 +52,14 @@ up: .env
 	@echo "Waiting for services to be healthy..."
 	@sleep 15
 	@$(MAKE) status
+
+init: up
+	@echo "Waiting for services to be fully ready..."
+	@sleep 20
+	@$(MAKE) topics
+	@echo ""
+	@echo "✓ Infrastructure ready."
+	@echo "  Run: make demo"	
 
 down:
 	docker compose down
@@ -73,8 +87,16 @@ topics:
 	    --bootstrap-server localhost:9093 \
 	    --create --topic payment-events --partitions 3 --replication-factor 1 --if-not-exists && \
 	  docker exec kafka kafka-topics \
-	    --bootstrap-server localhost:9093 \
-	    --create --topic dead-letter-events --partitions 1 --replication-factor 1 --if-not-exists
+            --bootstrap-server localhost:9093 \
+            --create --topic dead-letter-events \
+            --partitions 1 --replication-factor 1 \
+            --if-not-exists && \
+       docker exec kafka kafka-topics \
+            --bootstrap-server localhost:9093 \
+            --create --topic stripe-raw-events \
+            --partitions 3 --replication-factor 1 \
+            --config retention.ms=604800000 \
+            --if-not-exists
 	@echo "✓ Topics created. View at http://localhost:8080"
 
 list-topics:
@@ -122,6 +144,39 @@ produce-all:
 
 dlq:
 	PYTHONPATH=. python consumers/dlq_consumer.py
+
+
+# ── DEMO ────────────────────────────────────────────────────────
+# One-command start/stop for the full pipeline — avoids opening
+# 5-6 separate terminal windows manually every time.
+
+demo:
+	@bash scripts/start_demo.sh
+
+demo-stop:
+	@bash scripts/stop_demo.sh
+
+# Tail Spark logs with noise filtered out — only shows batch
+# completions and real errors, not Kafka/Spark startup warnings
+demo-watch:
+	@tail -f logs/spark.log | grep --line-buffered -E "batch_completed|batch_started|streaming_job_started|failed|ERROR"
+
+# Quick check on whether demo processes are still alive
+demo-status:
+	@for name in orders inventory stripe_receiver stripe_listen spark; do \
+		pidfile="logs/$$name.pid"; \
+		if [ -f "$$pidfile" ]; then \
+			pid=$$(cat "$$pidfile"); \
+			if kill -0 "$$pid" 2>/dev/null; then \
+				echo "✓ $$name running (PID $$pid)"; \
+			else \
+				echo "✗ $$name not running (stale PID file)"; \
+			fi; \
+		else \
+			echo "✗ $$name not started"; \
+		fi; \
+	done
+
 
 # ── TESTING ────────────────────────────────────────────────────
 
