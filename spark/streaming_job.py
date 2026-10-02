@@ -221,8 +221,7 @@ def write_orders_batch(batch_df: DataFrame, batch_id: int):
             "rows": len(records),
         }))
 
-        # After writing orders, run reconciliation
-        reconcile_from_postgres(batch_id)
+
 
     except Exception as e:
         if conn:
@@ -255,15 +254,15 @@ def write_inventory_batch(batch_df: DataFrame, batch_id: int):
                 row.sku,
                 int(row.quantity_delta) if row.quantity_delta else None,
                 row.warehouse_id,
+                row.order_id,
                 json.dumps(row.asDict(), default=str),
             ))
-
         with conn.cursor() as cur:
             psycopg2.extras.execute_batch(cur, """
                 INSERT INTO raw_inventory_events
                     (inventory_id, event_type, event_timestamp,
-                     sku, quantity_delta, warehouse_id, raw_payload)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                     sku, quantity_delta, warehouse_id, order_id, raw_payload)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (inventory_id, event_type, event_timestamp) DO NOTHING
             """, records)
         conn.commit()
@@ -444,7 +443,7 @@ def reconcile_from_postgres(batch_id: int):
 
         write_pipeline_metrics(
             batch_id=batch_id,
-            input_rows=0,
+            input_rows=order_count + payment_count + inventory_count,
             reconciled_rows=reconciled_count,
             dlq_rows=0,
             processing_duration_ms=duration_ms,
