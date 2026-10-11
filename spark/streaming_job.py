@@ -330,7 +330,7 @@ def write_payments_batch(batch_df: DataFrame, batch_id: int):
 
 # ── RECONCILIATION FROM POSTGRESQL ────────────────────────────
 
-def reconcile_from_postgres(batch_id: int):
+def reconcile_from_postgres(batch_id: int, input_rows: int = 0):
     """
     Join the three raw tables in PostgreSQL and write reconciled records.
 
@@ -443,7 +443,7 @@ def reconcile_from_postgres(batch_id: int):
 
         write_pipeline_metrics(
             batch_id=batch_id,
-            input_rows=order_count + payment_count + inventory_count,
+            input_rows=input_rows,
             reconciled_rows=reconciled_count,
             dlq_rows=0,
             processing_duration_ms=duration_ms,
@@ -498,18 +498,48 @@ def run():
         inventory_raw = batch_df.filter(col("topic") == "inventory-events")
 
         # Parse each topic's payload
+        # Valid events pass to their writers.
+        # Events with null primary-key fields are routed to dead_letter_events.
         from pyspark.sql.functions import from_json
-        orders_df = orders_raw.select(
-            from_json(col("value").cast("string"), ORDER_SCHEMA).alias("d")
-        ).select("d.*").filter(col("order_id").isNotNull())
 
-        payments_df = payments_raw.select(
-            from_json(col("value").cast("string"), PAYMENT_SCHEMA).alias("d")
-        ).select("d.*").filter(col("payment_id").isNotNull())
+        # Orders
+        orders_parsed = orders_raw.select(
+            from_json(col("value").cast("string"), ORDER_SCHEMA).alias("d"),
+            col("value").cast("string").alias("_raw")
+        ).select("d.*", "_raw")
+        orders_df = orders_parsed.filter(col("order_id").isNotNull())
+        orders_dlq = orders_parsed.filter(col("order_id").isNull()) \
+            .withColumn("source_topic", lit("order-events")) \
+            .withColumn("failure_reason", lit("MISSING_ORDER_ID")) \
+            .withColumnRenamed("_raw", "raw_payload")
+        if not orders_dlq.rdd.isEmpty():
+            write_dlq_to_postgres(orders_dlq, batch_id)
 
-        inventory_df = inventory_raw.select(
-            from_json(col("value").cast("string"), INVENTORY_SCHEMA).alias("d")
-        ).select("d.*").filter(col("inventory_id").isNotNull())
+        # Payments
+        payments_parsed = payments_raw.select(
+            from_json(col("value").cast("string"), PAYMENT_SCHEMA).alias("d"),
+            col("value").cast("string").alias("_raw")
+        ).select("d.*", "_raw")
+        payments_df = payments_parsed.filter(col("payment_id").isNotNull())
+        payments_dlq = payments_parsed.filter(col("payment_id").isNull()) \
+            .withColumn("source_topic", lit("payment-events")) \
+            .withColumn("failure_reason", lit("MISSING_PAYMENT_ID")) \
+            .withColumnRenamed("_raw", "raw_payload")
+        if not payments_dlq.rdd.isEmpty():
+            write_dlq_to_postgres(payments_dlq, batch_id)
+
+        # Inventory
+        inventory_parsed = inventory_raw.select(
+            from_json(col("value").cast("string"), INVENTORY_SCHEMA).alias("d"),
+            col("value").cast("string").alias("_raw")
+        ).select("d.*", "_raw")
+        inventory_df = inventory_parsed.filter(col("inventory_id").isNotNull())
+        inventory_dlq = inventory_parsed.filter(col("inventory_id").isNull()) \
+            .withColumn("source_topic", lit("inventory-events")) \
+            .withColumn("failure_reason", lit("MISSING_INVENTORY_ID")) \
+            .withColumnRenamed("_raw", "raw_payload")
+        if not inventory_dlq.rdd.isEmpty():
+            write_dlq_to_postgres(inventory_dlq, batch_id)
 
         # Write raw events to PostgreSQL
         order_count = 0
@@ -530,7 +560,10 @@ def run():
 
         # Reconcile via PostgreSQL SQL join
         if order_count > 0 or payment_count > 0 or inventory_count > 0:
-            reconcile_from_postgres(batch_id)
+            reconcile_from_postgres(
+                batch_id,
+                input_rows=order_count + payment_count + inventory_count
+            )
 
         duration_ms = int((time.time() - start_time) * 1000)
 
