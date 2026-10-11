@@ -210,4 +210,4 @@ class PaymentProducer(BaseProducer):
 
 if __name__ == "__main__":
     producer = PaymentProducer(fault_injection_rate=0.08)
-    producer.run_continuous(events_per_second=1.0, max_events=500)
+    producer.run_continuous(events_per_second=1.0, max_events=3000)

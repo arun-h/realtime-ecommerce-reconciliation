@@ -1,6 +1,17 @@
 """
 spark/normaliser.py — Field normalisation for cross-domain schema differences
 
+NOTE ON CURRENT USAGE:
+In the current architecture, the functions in this file are defined
+and imported in streaming_job.py but are not called in the production
+execution path (process_all_topics()). Field mapping (occurred_at →
+event_timestamp) is handled inline in write_inventory_batch() by
+mapping row.occurred_at directly to the event_timestamp SQL column.
+
+These functions remain available if the architecture is redesigned
+to include a Spark DataFrame transformation layer before writing.
+
+ORIGINAL PURPOSE (documented below):
 WHY THIS FILE EXISTS:
 Three producers, three teams, three schemas. They don't coordinate.
 Before the reconciler can join order + inventory + payment events,
@@ -26,7 +37,6 @@ PROBLEM 2 — Timestamp type for Spark watermark:
 WHAT THIS FILE DOES NOT DO:
 - Stripe cents→dollars conversion (done in stripe_receiver.py at ingestion)
 - Schema validation (done in validators.py)
-- Business logic (done in reconciler.py)
 
 Each file has one job.
 """

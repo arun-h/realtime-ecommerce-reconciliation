@@ -205,4 +205,4 @@ def json_log(event: str, data: dict) -> str:
 if __name__ == "__main__":
     import json
     producer = OrderProducer(fault_injection_rate=0.05)
-    producer.run_continuous(events_per_second=2.0, max_events=500)
+    producer.run_continuous(events_per_second=2.0, max_events=3000)

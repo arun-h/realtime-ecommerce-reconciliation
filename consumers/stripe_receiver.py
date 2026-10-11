@@ -25,6 +25,7 @@ import random
 import string
 from datetime import datetime, timezone
 
+import psycopg2
 import stripe
 import uvicorn
 from confluent_kafka import Producer, KafkaException
@@ -81,6 +82,52 @@ def unix_to_iso(unix_ts: int | None) -> str | None:
         return None
     return datetime.fromtimestamp(unix_ts, tz=timezone.utc).isoformat()
 
+def get_recent_order_id() -> str:
+    """
+    For local/test Stripe events without metadata, attach a real
+    recent order_id so reconciliation can actually measure latency
+    end-to-end against live data.
+
+    WHY THIS EXISTS:
+    Stripe test triggers (`stripe trigger payment_intent.succeeded`)
+    do not carry real order metadata. Without this bridge, every
+    test payment gets a random order_id that never matches anything
+    in raw_order_events, and reconciliation latency can never be
+    measured from real data.
+
+    In production, the order service passes order_id via PaymentIntent
+    metadata at creation time — this function only exists to close
+    that gap in a local test environment. It is not production logic.
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            user=os.getenv("POSTGRES_USER"),
+            password=os.getenv("POSTGRES_PASSWORD"),
+            dbname=os.getenv("POSTGRES_DB"),
+            connect_timeout=10,
+        )
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT order_id FROM raw_order_events
+                WHERE event_type = 'ORDER_CREATED'
+                ORDER BY event_timestamp DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+            return row[0] if row else (
+                "ORD-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+            )
+    except Exception as e:
+        logger.warning(f"get_recent_order_id failed, using random fallback: {e}")
+        return "ORD-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    finally:
+        if conn:
+            conn.close()
+
+
 def cents_to_dollars(amount_cents: int | None) -> float | None:
     """
     Convert Stripe's integer cents to float dollars.
@@ -124,9 +171,7 @@ def normalise_stripe_payload(event: stripe.Event) -> dict:
     # We expect the order_id to be passed as metadata when creating the intent.
     # If missing (e.g. in test triggers), we use the payment_intent id.
     metadata = getattr(data_obj, "metadata", {}) or {}
-    order_id = metadata.get("order_id") or (
-    "ORD-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
-)
+    order_id = metadata.get("order_id") or get_recent_order_id()
 
     return {
         "payment_id":       data_obj.id,

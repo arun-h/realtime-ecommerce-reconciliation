@@ -9,3 +9,5 @@ airflow_project/logs/
 airflow_project/__pycache__/
 airflow_project/dags/__pycache__/
 airflow_project/airflow.cfg
+logs/
+project knowledge.md

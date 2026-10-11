@@ -19,13 +19,19 @@ This is the schema reconciliation problem our pipeline is built to solve.
 """
 
 import json
+import os
 import random
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+import psycopg2
+from dotenv import load_dotenv
+
 from producers.base_producer import BaseProducer, logger
+
+load_dotenv()
 
 
 WAREHOUSE_IDS = ["WH-EAST-01", "WH-WEST-02", "WH-CENTRAL-03"]
@@ -55,6 +61,49 @@ class InventoryProducer(BaseProducer):
         """
         super().__init__(topic="inventory-events")
         self.fault_injection_rate = fault_injection_rate
+    
+    def get_recent_order_id(self) -> str | None:
+        """
+        Pull a real, recent order_id from PostgreSQL so INVENTORY_RESERVED
+        events can be reconciled against real orders.
+
+        WHY THIS EXISTS:
+        Without this, INVENTORY_RESERVED events carry no order_id, and the
+        reconciliation join in PostgreSQL has nothing to match — inventory
+        match rate stays at 0% regardless of pipeline correctness.
+
+        In production, the inventory service receives order_id directly
+        from the order service at reservation time (e.g. via the order
+        event itself triggering a reservation call). This function is a
+        local-test bridge that approximates that link using the most
+        recently created order, since this producer runs independently
+        of the order producer with no shared event bus between them.
+        """
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                user=os.getenv("POSTGRES_USER"),
+                password=os.getenv("POSTGRES_PASSWORD"),
+                dbname=os.getenv("POSTGRES_DB"),
+                connect_timeout=5,
+            )
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT order_id FROM raw_order_events
+                    WHERE event_type = 'ORDER_CREATED'
+                    ORDER BY event_timestamp DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logger.warning(f"get_recent_order_id failed: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
 
     def generate_event(
         self,
@@ -170,7 +219,8 @@ class InventoryProducer(BaseProducer):
 
         try:
             while produced < max_events:
-                event = self.generate_event()
+                recent_order_id = self.get_recent_order_id()
+                event = self.generate_event(order_id=recent_order_id)
                 key = event.get("inventory_id", "unknown")
                 self.send(key=key, payload=event)
                 produced += 1
@@ -184,4 +234,4 @@ class InventoryProducer(BaseProducer):
 
 if __name__ == "__main__":
     producer = InventoryProducer(fault_injection_rate=0.03)
-    producer.run_continuous(events_per_second=1.5, max_events=500)
+    producer.run_continuous(events_per_second=1.5, max_events=3000)
