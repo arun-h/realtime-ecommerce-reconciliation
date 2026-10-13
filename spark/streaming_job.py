@@ -497,49 +497,88 @@ def run():
         payments_raw = batch_df.filter(col("topic") == "payment-events")
         inventory_raw = batch_df.filter(col("topic") == "inventory-events")
 
-        # Parse each topic's payload
-        # Valid events pass to their writers.
-        # Events with null primary-key fields are routed to dead_letter_events.
+        # Parse each topic's payload, then apply two-layer filtering:
+        # Layer 1: null primary-key filter → DLQ (schema-level rejection)
+        # Layer 2: business-rule validation → DLQ (logic-level rejection)
         from pyspark.sql.functions import from_json
 
-        # Orders
+        # ── ORDERS ─────────────────────────────────────────────
         orders_parsed = orders_raw.select(
             from_json(col("value").cast("string"), ORDER_SCHEMA).alias("d"),
             col("value").cast("string").alias("_raw")
         ).select("d.*", "_raw")
-        orders_df = orders_parsed.filter(col("order_id").isNotNull())
-        orders_dlq = orders_parsed.filter(col("order_id").isNull()) \
+
+        orders_null_ok  = orders_parsed.filter(col("order_id").isNotNull())
+        orders_null_bad = orders_parsed.filter(col("order_id").isNull()) \
             .withColumn("source_topic", lit("order-events")) \
             .withColumn("failure_reason", lit("MISSING_ORDER_ID")) \
             .withColumnRenamed("_raw", "raw_payload")
-        if not orders_dlq.rdd.isEmpty():
-            write_dlq_to_postgres(orders_dlq, batch_id)
+        if not orders_null_bad.rdd.isEmpty():
+            write_dlq_to_postgres(orders_null_bad, batch_id)
 
-        # Payments
+        orders_valid, orders_invalid = validate_stream(
+            orders_null_ok.drop("_raw"), "order-events"
+        )
+        if not orders_invalid.rdd.isEmpty():
+            write_dlq_to_postgres(
+                orders_invalid.withColumn(
+                    "raw_payload", lit(None).cast("string")
+                ),
+                batch_id
+            )
+        orders_df = orders_valid
+
+        # ── PAYMENTS ────────────────────────────────────────────
         payments_parsed = payments_raw.select(
             from_json(col("value").cast("string"), PAYMENT_SCHEMA).alias("d"),
             col("value").cast("string").alias("_raw")
         ).select("d.*", "_raw")
-        payments_df = payments_parsed.filter(col("payment_id").isNotNull())
-        payments_dlq = payments_parsed.filter(col("payment_id").isNull()) \
+
+        payments_null_ok  = payments_parsed.filter(col("payment_id").isNotNull())
+        payments_null_bad = payments_parsed.filter(col("payment_id").isNull()) \
             .withColumn("source_topic", lit("payment-events")) \
             .withColumn("failure_reason", lit("MISSING_PAYMENT_ID")) \
             .withColumnRenamed("_raw", "raw_payload")
-        if not payments_dlq.rdd.isEmpty():
-            write_dlq_to_postgres(payments_dlq, batch_id)
+        if not payments_null_bad.rdd.isEmpty():
+            write_dlq_to_postgres(payments_null_bad, batch_id)
 
-        # Inventory
+        payments_valid, payments_invalid = validate_stream(
+            payments_null_ok.drop("_raw"), "payment-events"
+        )
+        if not payments_invalid.rdd.isEmpty():
+            write_dlq_to_postgres(
+                payments_invalid.withColumn(
+                    "raw_payload", lit(None).cast("string")
+                ),
+                batch_id
+            )
+        payments_df = payments_valid
+
+        # ── INVENTORY ───────────────────────────────────────────
         inventory_parsed = inventory_raw.select(
             from_json(col("value").cast("string"), INVENTORY_SCHEMA).alias("d"),
             col("value").cast("string").alias("_raw")
         ).select("d.*", "_raw")
-        inventory_df = inventory_parsed.filter(col("inventory_id").isNotNull())
-        inventory_dlq = inventory_parsed.filter(col("inventory_id").isNull()) \
+
+        inventory_null_ok  = inventory_parsed.filter(col("inventory_id").isNotNull())
+        inventory_null_bad = inventory_parsed.filter(col("inventory_id").isNull()) \
             .withColumn("source_topic", lit("inventory-events")) \
             .withColumn("failure_reason", lit("MISSING_INVENTORY_ID")) \
             .withColumnRenamed("_raw", "raw_payload")
-        if not inventory_dlq.rdd.isEmpty():
-            write_dlq_to_postgres(inventory_dlq, batch_id)
+        if not inventory_null_bad.rdd.isEmpty():
+            write_dlq_to_postgres(inventory_null_bad, batch_id)
+
+        inventory_valid, inventory_invalid = validate_stream(
+            inventory_null_ok.drop("_raw"), "inventory-events"
+        )
+        if not inventory_invalid.rdd.isEmpty():
+            write_dlq_to_postgres(
+                inventory_invalid.withColumn(
+                    "raw_payload", lit(None).cast("string")
+                ),
+                batch_id
+            )
+        inventory_df = inventory_valid
 
         # Write raw events to PostgreSQL
         order_count = 0
