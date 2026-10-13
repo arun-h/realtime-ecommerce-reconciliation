@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
+from confluent_kafka import Producer as KafkaProducer
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import (
     col, year, month, dayofmonth, hour,
@@ -235,6 +236,23 @@ def write_dlq_to_postgres(batch_df: DataFrame, batch_id: int) -> int:
             "batch_id": batch_id,
             "rows_written": len(records),
         }))
+
+        # ── ALSO PUBLISH TO KAFKA dead-letter-events TOPIC ─────
+        # PostgreSQL is the authoritative DLQ store. Kafka publish
+        # is best-effort — failure here does not roll back the
+        # PostgreSQL write. This makes the two-layer DLQ claim true:
+        # consumers can subscribe to dead-letter-events for real-time
+        # alerting, while PostgreSQL provides historical querying.
+        try:
+            _publish_dlq_to_kafka(batch_df, batch_id)
+        except Exception as kafka_err:
+            logger.warning(json.dumps({
+                "event": "dlq_kafka_publish_failed",
+                "batch_id": batch_id,
+                "error": str(kafka_err),
+                "note": "PostgreSQL write succeeded — Kafka publish is best-effort",
+            }))
+
         return len(records)
 
     except Exception as e:
@@ -250,6 +268,56 @@ def write_dlq_to_postgres(batch_df: DataFrame, batch_id: int) -> int:
         if conn:
             conn.close()
 
+def _publish_dlq_to_kafka(batch_df: DataFrame, batch_id: int) -> None:
+    """
+    Publish DLQ events to Kafka dead-letter-events topic.
+
+    WHY THIS IS SECONDARY TO POSTGRESQL:
+    PostgreSQL is the authoritative DLQ store — it's queryable,
+    indexed, and persistent. Kafka is used here for real-time
+    consumers (dlq_consumer.py) that can subscribe to failure events
+    for alerting or monitoring without polling the database.
+
+    BEST-EFFORT SEMANTICS:
+    If Kafka is unavailable, we log a warning and continue.
+    The PostgreSQL write already succeeded — events are not lost.
+    This avoids a Kafka outage taking down the full pipeline.
+
+    NOT CALLED DIRECTLY:
+    Called from write_dlq_to_postgres() after PostgreSQL write succeeds.
+    """
+    kafka_bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
+    producer = KafkaProducer({
+        "bootstrap.servers": kafka_bootstrap,
+        "acks": "1",
+        "retries": 2,
+        "delivery.timeout.ms": 5000,
+    })
+
+    rows = batch_df.collect()
+    published = 0
+
+    for row in rows:
+        payload = {
+            "source_topic": row.source_topic if hasattr(row, "source_topic") else "unknown",
+            "failure_reason": row.failure_reason if hasattr(row, "failure_reason") else "UNKNOWN",
+            "batch_id": batch_id,
+        }
+        producer.produce(
+            topic="dead-letter-events",
+            value=json.dumps(payload, default=str).encode("utf-8"),
+            key=payload["source_topic"].encode("utf-8"),
+        )
+        published += 1
+
+    producer.flush(timeout=5)
+
+    logger.info(json.dumps({
+        "event": "dlq_kafka_published",
+        "batch_id": batch_id,
+        "events_published": published,
+    }))
 
 def write_pipeline_metrics(
     batch_id: int,

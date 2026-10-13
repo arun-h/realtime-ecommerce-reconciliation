@@ -3,7 +3,7 @@
 cd "$(dirname "$0")/.."
 echo "Stopping pipeline components..."
 
-for name in orders inventory stripe_receiver stripe_listen spark; do
+for name in orders inventory stripe_receiver stripe_listen spark dlq_consumer; do
     pidfile="logs/${name}.pid"
     if [ -f "$pidfile" ]; then
         pid=$(cat "$pidfile")
