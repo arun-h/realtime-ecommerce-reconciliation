@@ -110,6 +110,21 @@ def get_recent_order_id() -> str:
             connect_timeout=10,
         )
         with conn.cursor() as cur:
+            # Prefer a fresh order from the last 10 seconds so the
+            # payment webhook arrives well inside the 60-second SLA window.
+            # Fallback: most recent order if no fresh one exists
+            # (e.g. producers stopped before webhook fires).
+            cur.execute("""
+                SELECT order_id FROM raw_order_events
+                WHERE event_type = 'ORDER_CREATED'
+                AND event_timestamp >= NOW() - INTERVAL '10 seconds'
+                ORDER BY RANDOM()
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            # Fallback to most recent order
             cur.execute("""
                 SELECT order_id FROM raw_order_events
                 WHERE event_type = 'ORDER_CREATED'
