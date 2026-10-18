@@ -156,32 +156,42 @@ demo:
 demo-stop:
 	@bash scripts/stop_demo.sh
 
-# Tail Spark logs with noise filtered out — only shows batch
-# completions and real errors, not Kafka/Spark startup warnings
 demo-watch:
-	@tail -f logs/spark.log | grep --line-buffered -E "batch_completed|batch_started|streaming_job_started|failed|ERROR"
+	@echo "==================================================="
+	@echo "  Real-Time E-Commerce Reconciliation Pipeline"
+	@echo "  Watching live batch output (Ctrl+C to stop)"
+	@echo "==================================================="
+	@tail -f logs/spark.log | grep --line-buffered -E \
+	  "batch_completed|streaming_job_started|dlq_write_success|dlq_kafka_published|failed|ERROR" \
+	  | while IFS= read -r line; do \
+	    echo "  $$(date '+%H:%M:%S') $$line"; \
+	  done
 
 # Quick check on whether demo processes are still alive
 demo-status:
+	@echo "==================================================="
+	@echo "  Pipeline Component Status"
+	@echo "==================================================="
 	@for name in orders inventory stripe_receiver stripe_listen spark; do \
 		pidfile="logs/$$name.pid"; \
 		if [ -f "$$pidfile" ]; then \
 			pid=$$(cat "$$pidfile"); \
 			if kill -0 "$$pid" 2>/dev/null; then \
-				echo "✓ $$name running (PID $$pid)"; \
+				echo "  [OK] $$name (PID $$pid)"; \
 			else \
-				echo "✗ $$name not running (stale PID file)"; \
+				echo "  [STALE] $$name (PID $$pid)"; \
 			fi; \
 		else \
-			echo "✗ $$name not started"; \
+			echo "  [NOT STARTED] $$name"; \
 		fi; \
 	done
+	@echo "==================================================="
 
 
 # ── TESTING ────────────────────────────────────────────────────
 
 test:
-	PYTHONPATH=. pytest tests/ -v --cov=. --cov-report=term-missing
+	PYTHONPATH=. pytest tests/ -v
 
 test-fast:
 	PYTHONPATH=. pytest tests/ -v -x  # Stop on first failure

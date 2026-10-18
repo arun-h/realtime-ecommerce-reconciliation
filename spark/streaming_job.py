@@ -330,7 +330,7 @@ def write_payments_batch(batch_df: DataFrame, batch_id: int):
 
 # ── RECONCILIATION FROM POSTGRESQL ────────────────────────────
 
-def reconcile_from_postgres(batch_id: int, input_rows: int = 0):
+def reconcile_from_postgres(batch_id: int, input_rows: int = 0,dlq_rows: int = 0):
     """
     Join the three raw tables in PostgreSQL and write reconciled records.
 
@@ -501,7 +501,7 @@ def run():
         # Layer 1: null primary-key filter → DLQ (schema-level rejection)
         # Layer 2: business-rule validation → DLQ (logic-level rejection)
         from pyspark.sql.functions import from_json
-
+        dlq_count=0
         # ── ORDERS ─────────────────────────────────────────────
         orders_parsed = orders_raw.select(
             from_json(col("value").cast("string"), ORDER_SCHEMA).alias("d"),
@@ -513,20 +513,23 @@ def run():
             .withColumn("source_topic", lit("order-events")) \
             .withColumn("failure_reason", lit("MISSING_ORDER_ID")) \
             .withColumnRenamed("_raw", "raw_payload")
+        
         if not orders_null_bad.rdd.isEmpty():
-            write_dlq_to_postgres(orders_null_bad, batch_id)
+            dlq_count += write_dlq_to_postgres(orders_null_bad, batch_id)
 
         orders_valid, orders_invalid = validate_stream(
             orders_null_ok.drop("_raw"), "order-events"
         )
         if not orders_invalid.rdd.isEmpty():
-            write_dlq_to_postgres(
+            dlq_count += write_dlq_to_postgres(
                 orders_invalid.withColumn(
-                    "raw_payload", lit(None).cast("string")
-                ),
+                    "raw_payload",
+                    col("_raw")
+                ).drop("_raw"),
                 batch_id
             )
-        orders_df = orders_valid
+        orders_df = orders_valid.drop("_raw")
+      
 
         # ── PAYMENTS ────────────────────────────────────────────
         payments_parsed = payments_raw.select(
@@ -540,19 +543,20 @@ def run():
             .withColumn("failure_reason", lit("MISSING_PAYMENT_ID")) \
             .withColumnRenamed("_raw", "raw_payload")
         if not payments_null_bad.rdd.isEmpty():
-            write_dlq_to_postgres(payments_null_bad, batch_id)
+            dlq_count += write_dlq_to_postgres(payments_null_bad, batch_id)
 
         payments_valid, payments_invalid = validate_stream(
             payments_null_ok.drop("_raw"), "payment-events"
         )
         if not payments_invalid.rdd.isEmpty():
-            write_dlq_to_postgres(
+            dlq_count += write_dlq_to_postgres(
                 payments_invalid.withColumn(
-                    "raw_payload", lit(None).cast("string")
-                ),
+                    "raw_payload",
+                    col("_raw")
+                ).drop("_raw"),
                 batch_id
             )
-        payments_df = payments_valid
+        payments_df = payments_valid.drop("_raw")
 
         # ── INVENTORY ───────────────────────────────────────────
         inventory_parsed = inventory_raw.select(
@@ -566,19 +570,20 @@ def run():
             .withColumn("failure_reason", lit("MISSING_INVENTORY_ID")) \
             .withColumnRenamed("_raw", "raw_payload")
         if not inventory_null_bad.rdd.isEmpty():
-            write_dlq_to_postgres(inventory_null_bad, batch_id)
+            dlq_count += write_dlq_to_postgres(inventory_null_bad, batch_id)
 
         inventory_valid, inventory_invalid = validate_stream(
             inventory_null_ok.drop("_raw"), "inventory-events"
         )
         if not inventory_invalid.rdd.isEmpty():
-            write_dlq_to_postgres(
+            dlq_count += write_dlq_to_postgres(
                 inventory_invalid.withColumn(
-                    "raw_payload", lit(None).cast("string")
-                ),
+                    "raw_payload",
+                    col("_raw")
+                ).drop("_raw"),
                 batch_id
             )
-        inventory_df = inventory_valid
+        inventory_df = inventory_valid.drop("_raw")
 
         # Write raw events to PostgreSQL
         order_count = 0
@@ -601,7 +606,8 @@ def run():
         if order_count > 0 or payment_count > 0 or inventory_count > 0:
             reconcile_from_postgres(
                 batch_id,
-                input_rows=order_count + payment_count + inventory_count
+                input_rows=order_count + payment_count + inventory_count,
+                dlq_rows=dlq_count
             )
 
         duration_ms = int((time.time() - start_time) * 1000)

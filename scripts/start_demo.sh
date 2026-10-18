@@ -5,7 +5,12 @@ cd "$(dirname "$0")/.."
 source ecomvenv/bin/activate
 mkdir -p logs
 
-echo "Starting pipeline components..."
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Real-Time E-Commerce Reconciliation Pipeline"
+echo "  Starting all components..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
 
 PYTHONPATH=. python producers/order_producer.py > logs/orders.log 2>&1 &
 echo $! > logs/orders.pid
@@ -29,15 +34,13 @@ PYTHONPATH=. python -m spark.streaming_job > logs/spark.log 2>&1 &
 echo $! > logs/spark.pid
 echo "✓ Spark streaming job (PID $(cat logs/spark.pid))"
 
-# DLQ consumer — reads from Kafka dead-letter-events topic
-# and provides real-time visibility into validation failures
-PYTHONPATH=. python -m consumers.dlq_consumer > logs/dlq_consumer.log 2>&1 &
-echo $! > logs/dlq_consumer.pid
-echo "✓ DLQ consumer (PID $(cat logs/dlq_consumer.pid))"
-
 echo ""
-echo "All components running."
-echo "Watch clean Spark output with:"
-echo "  make demo-watch"
-echo "Stop everything with:"
-echo "  make demo-stop"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  All 5 components running"
+echo ""
+echo "  make demo-watch    → live pipeline output"
+echo "  make demo-status   → check process health"
+echo "  make db-counts     → current row counts"
+echo "  make demo-stop     → graceful shutdown"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
