@@ -73,6 +73,12 @@ def get_postgres_connection():
 
 
 # ── SINK 1: POSTGRESQL UPSERT ──────────────────────────────────
+# ── DEPRECATED — NOT CALLED IN PRODUCTION PATH ─────────────────
+# write_reconciled_to_postgres() is dead code. Reconciliation upserts
+# are performed directly in PostgreSQL via reconcile_from_postgres()
+# in spark/streaming_job.py (SQL LEFT JOIN + ON CONFLICT DO UPDATE).
+# This function is retained for reference only. Do not call it.
+# ────────────────────────────────────────────────────────────────
 def write_reconciled_to_postgres(batch_df: DataFrame, batch_id: int) -> int:
     """
     Write reconciled events to PostgreSQL via idempotent upsert.

@@ -408,13 +408,13 @@ def reconcile_from_postgres(batch_id: int, input_rows: int = 0,dlq_rows: int = 0
                     AND p.event_type = 'PAYMENT_CONFIRMED'
                     AND p.event_timestamp >= o.event_timestamp
                     AND p.event_timestamp <= o.event_timestamp
-                        + INTERVAL '60 seconds'
+                        + (%(payment_sla)s || ' seconds')::interval
                 LEFT JOIN raw_inventory_events i
                     ON i.order_id = o.order_id
                     AND i.event_type = 'INVENTORY_RESERVED'
                     AND i.event_timestamp >= o.event_timestamp
                     AND i.event_timestamp <= o.event_timestamp
-                        + INTERVAL '60 seconds'
+                        + (%(inventory_sla)s || ' seconds')::interval
                 WHERE o.event_type = 'ORDER_CREATED'
                 ORDER BY o.order_id, o.event_timestamp, p.event_timestamp ASC
                 ON CONFLICT (order_id, event_timestamp)
