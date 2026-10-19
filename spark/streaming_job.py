@@ -445,7 +445,7 @@ def reconcile_from_postgres(batch_id: int, input_rows: int = 0,dlq_rows: int = 0
             batch_id=batch_id,
             input_rows=input_rows,
             reconciled_rows=reconciled_count,
-            dlq_rows=0,
+            dlq_rows=dlq_rows,
             processing_duration_ms=duration_ms,
         )
 
@@ -518,14 +518,11 @@ def run():
             dlq_count += write_dlq_to_postgres(orders_null_bad, batch_id)
 
         orders_valid, orders_invalid = validate_stream(
-            orders_null_ok.drop("_raw"), "order-events"
+            orders_null_ok, "order-events"
         )
         if not orders_invalid.rdd.isEmpty():
             dlq_count += write_dlq_to_postgres(
-                orders_invalid.withColumn(
-                    "raw_payload",
-                    col("_raw")
-                ).drop("_raw"),
+                orders_invalid.withColumnRenamed("_raw", "raw_payload"),
                 batch_id
             )
         orders_df = orders_valid.drop("_raw")
@@ -546,14 +543,11 @@ def run():
             dlq_count += write_dlq_to_postgres(payments_null_bad, batch_id)
 
         payments_valid, payments_invalid = validate_stream(
-            payments_null_ok.drop("_raw"), "payment-events"
+            payments_null_ok, "payment-events"
         )
         if not payments_invalid.rdd.isEmpty():
             dlq_count += write_dlq_to_postgres(
-                payments_invalid.withColumn(
-                    "raw_payload",
-                    col("_raw")
-                ).drop("_raw"),
+                payments_invalid.withColumnRenamed("_raw", "raw_payload"),
                 batch_id
             )
         payments_df = payments_valid.drop("_raw")
@@ -573,14 +567,11 @@ def run():
             dlq_count += write_dlq_to_postgres(inventory_null_bad, batch_id)
 
         inventory_valid, inventory_invalid = validate_stream(
-            inventory_null_ok.drop("_raw"), "inventory-events"
+            inventory_null_ok, "inventory-events"
         )
         if not inventory_invalid.rdd.isEmpty():
             dlq_count += write_dlq_to_postgres(
-                inventory_invalid.withColumn(
-                    "raw_payload",
-                    col("_raw")
-                ).drop("_raw"),
+                inventory_invalid.withColumnRenamed("_raw", "raw_payload"),
                 batch_id
             )
         inventory_df = inventory_valid.drop("_raw")
@@ -603,7 +594,7 @@ def run():
             inventory_count = inventory_df.count()
 
         # Reconcile via PostgreSQL SQL join
-        if order_count > 0 or payment_count > 0 or inventory_count > 0:
+        if order_count > 0 or payment_count > 0 or inventory_count > 0 or dlq_count > 0:
             reconcile_from_postgres(
                 batch_id,
                 input_rows=order_count + payment_count + inventory_count,

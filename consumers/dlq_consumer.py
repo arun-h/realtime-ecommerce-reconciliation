@@ -1,17 +1,16 @@
 """
-dlq_consumer.py — Dead Letter Queue consumer
+consumers/dlq_consumer.py — Real-time DLQ monitoring consumer
 
-PURPOSE:
-Consumes from the dead-letter-events Kafka topic and writes
-failures to the PostgreSQL dead_letter_events table.
+ROLE IN THE ARCHITECTURE:
+This consumer reads from the Kafka dead-letter-events topic and provides
+real-time structured logging of validation failures for monitoring and alerting.
 
-WHY TWO PLACES (Kafka topic + PostgreSQL table)?
-  Kafka DLQ topic:   For replay and re-processing (fix the bug, replay the event)
-  PostgreSQL table:  For querying, trending, alerting ("DLQ rate rising?")
-
-They serve different purposes. In production you'd have both.
-For this project: Spark writes to the Kafka DLQ topic.
-This consumer reads from it and gives you queryable history.
+IMPORTANT — SINGLE WRITE OWNERSHIP:
+PySpark's write_dlq_to_postgres() in spark/streaming_job.py is the sole
+authoritative writer to the PostgreSQL dead_letter_events table. This consumer
+deliberately does NOT write to PostgreSQL — doing so would cause duplicate
+inserts since every DLQ event is already written by Spark before being
+published to Kafka. This consumer's role is observability only.
 """
 
 import json
@@ -21,7 +20,6 @@ import signal
 import sys
 from datetime import datetime, timezone
 
-import psycopg2
 from confluent_kafka import Consumer, KafkaError, KafkaException
 from dotenv import load_dotenv
 
@@ -32,67 +30,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s"
 )
 logger = logging.getLogger("dlq_consumer")
-
-
-def get_postgres_connection():
-    """
-    Create a PostgreSQL connection using environment variables.
-
-    WHY NOT HARDCODE THE CONNECTION STRING?
-    Same reason as before — secrets don't belong in code.
-    In production, this would use a connection pool (psycopg2 pool
-    or SQLAlchemy) rather than a single connection, but for our
-    DLQ consumer (low volume) a single connection is fine.
-    """
-    return psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "localhost"),
-        port=int(os.getenv("POSTGRES_PORT", "5432")),
-        user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD"),
-        dbname=os.getenv("POSTGRES_DB"),
-    )
-
-
-def write_to_dead_letter_table(
-    conn,
-    source_topic: str,
-    raw_payload: str,
-    failure_reason: str,
-) -> None:
-    """
-    Write one DLQ event to PostgreSQL.
-
-    NOTE: We use TEXT for raw_payload here, not JSONB.
-    WHY? Because the event might not be valid JSON —
-    that could be WHY it ended up in the DLQ.
-    Storing as TEXT ensures we never lose the payload
-    even if it's malformed.
-
-    ON CONFLICT DO NOTHING:
-    The dead_letter_events table uses BIGSERIAL (auto-increment) PK,
-    so duplicates can't happen via key conflict. But if this consumer
-    restarts and reprocesses Kafka messages (at-least-once), we could
-    write the same DLQ event twice. The failure_reason + failed_at
-    combination won't be identical enough to deduplicate automatically.
-    For DLQ, this is acceptable — we'd rather have duplicates in the
-    forensic log than miss events.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO dead_letter_events
-                (source_topic, raw_payload, failure_reason, failed_at)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (
-                source_topic,
-                raw_payload,
-                failure_reason[:200],  # Truncate to column length
-                datetime.now(timezone.utc),
-            )
-        )
-    conn.commit()
-
 
 def run_dlq_consumer():
     """
@@ -172,42 +109,13 @@ def run_dlq_consumer():
                 failure_reason = "INVALID_JSON"
                 source_topic = msg.topic()
 
-            # Write to Postgres
-            try:
-                write_to_dead_letter_table(
-                    conn=pg_conn,
-                    source_topic=source_topic,
-                    raw_payload=raw_payload,
-                    failure_reason=failure_reason,
-                )
-
-                # Commit offset AFTER successful Postgres write
-                # This is the manual commit for at-least-once delivery
-                consumer.commit(asynchronous=False)
-
-                processed += 1
-
-                if processed % 10 == 0:
-                    logger.info(json.dumps({
-                        "event": "dlq_checkpoint",
-                        "processed": processed,
-                        "errors": errors,
-                        "last_failure_reason": failure_reason,
-                        "last_source_topic": source_topic,
-                    }))
-
-            except Exception as e:
-                logger.error(json.dumps({
-                    "event": "dlq_write_failed",
-                    "error": str(e),
-                    "raw_payload_preview": raw_payload[:100],
+            logger.info(json.dumps({
+                    "event": "dlq_event_received",
+                    "source_topic": payload.get("source_topic", "unknown"),
+                    "failure_reason": payload.get("failure_reason", "unknown"),
+                    "batch_id": payload.get("batch_id"),
+                    "note": "PostgreSQL write handled by Spark — this consumer is monitoring only"
                 }))
-                errors += 1
-                # Reconnect to Postgres if connection was lost
-                try:
-                    pg_conn = get_postgres_connection()
-                except Exception as conn_err:
-                    logger.error(f"Failed to reconnect to Postgres: {conn_err}")
 
     finally:
         consumer.close()
